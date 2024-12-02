@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Audio Transcription</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="mb-4">Audio Transcription</h1>
+        <form id="transcription_form" enctype="multipart/form-data">
+            <div class="mb-3">
+                <label for="audio_file" class="form-label">Select an audio file:</label>
+                <input type="file" class="form-control" name="audio_file" id="audio_file" accept="audio/*">
+            </div>
+            <div class="mt-4">
+                <button id="recordButton" class="btn btn-danger"  type="button">Start Recording</button>
+                <button id="stopButton" class="btn btn-secondary" type="button" disabled>Stop Recording</button>
+            
+                <span id="recordingStatus" class="ml-2"></span>
+            </div>
+            <button type="submit" class="btn btn-primary">Transcribe</button>
+        </form>
+
+        <div class="mt-4" id="transcription_result">
+            <!-- Transcribed text will be shown here -->
+        </div>
+    </div>
+
+    <!-- Include jQuery -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+
+    <script>
+        $(document).ready(function () {
+            $("#transcription_form").submit(function (event) {
+                event.preventDefault();
+                var formData = new FormData(this);
+
+                $.ajax({
+                    url: "http://localhost:8000/api/transcribe", // Replace with the actual API endpoint
+                    type: "POST",
+                    data: formData,
+                    processData: false,
+                    contentType: false,
+                    success: function (response) {
+                        // Display the transcribed text
+                        $("#transcription_result").text(response.result);
+                    },
+                    error: function () {
+                        $("#transcription_result").text("Transcription failed.");
+                    }
+                });
+            });
+
+    // Original form submission code remains here...
+
+    // Add microphone recording functionality
+    let mediaRecorder;
+    let audioChunks = [];
+
+    const recordButton = document.getElementById('recordButton');
+    const stopButton = document.getElementById('stopButton');
+    const recordingStatus = document.getElementById('recordingStatus');
+
+    recordButton.addEventListener('click', async () => {
+        recordButton.disabled = true;
+        stopButton.disabled = false;
+        recordingStatus.textContent = "Recording...";
+
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+
+        mediaRecorder.ondataavailable = event => {
+            audioChunks.push(event.data);
+        };
+
+        mediaRecorder.start();
+    });
+
+    stopButton.addEventListener('click', async () => {
+        recordButton.disabled = false;
+        stopButton.disabled = true;
+        recordingStatus.textContent = "";
+
+        mediaRecorder.stop();
+
+        mediaRecorder.onstop = async () => {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            audioChunks = [];
+            const audioBuffer = await audioBlob.arrayBuffer();
+            
+            const context = new AudioContext();
+            const decodedAudio = await context.decodeAudioData(audioBuffer);
+            const offlineContext = new OfflineAudioContext(1, decodedAudio.sampleRate * decodedAudio.duration, 16000);
+
+            const source = offlineContext.createBufferSource();
+            source.buffer = decodedAudio;
+            source.connect(offlineContext.destination);
+            source.start();
+
+            const renderedBuffer = await offlineContext.startRendering();
+            const wavBlob = bufferToWavBlob(renderedBuffer);
+            // Send to backend
+            const formData = new FormData();
+            formData.append('audio_file', wavBlob, 'recording.wav');
+
+            $.ajax({
+                url: "http://localhost:8000/api/transcribe",
+                type: "POST",
+                data: formData,
+                processData: false,
+                contentType: false,
+                success: function (response) {
+                    $("#transcription_result").text(response.result);
+                },
+                error: function (xhr, status, error) {
+                    console.error("Error details:", xhr.responseText);
+                    $("#transcription_result").text("Transcription failed.");
+                }
+            });
+            // Create download link
+            // const a = document.createElement('a');
+            // a.href = URL.createObjectURL(wavBlob);
+            // a.download = 'recording.wav';
+            // a.textContent = 'Download your recording';
+            // document.body.appendChild(a);
+        };
+    });
+
+    function bufferToWavBlob(buffer) {
+        const numOfChannels = buffer.numberOfChannels;
+        const length = buffer.length * numOfChannels * 2 + 44;
+        const bufferArray = new ArrayBuffer(length);
+        const view = new DataView(bufferArray);
+        const channels = [];
+        let position = 0;
+
+        for (let i = 0; i < numOfChannels; i++) {
+            channels.push(buffer.getChannelData(i));
+        }
+
+        writeString(view, 0, 'RIFF');
+        view.setUint32(4, 36 + buffer.length * 2, true);
+        writeString(view, 8, 'WAVE');
+        writeString(view, 12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, numOfChannels, true);
+        view.setUint32(24, buffer.sampleRate, true);
+        view.setUint32(28, buffer.sampleRate * numOfChannels * 2, true);
+        view.setUint16(32, numOfChannels * 2, true);
+        view.setUint16(34, 16, true);
+        writeString(view, 36, 'data');
+        view.setUint32(40, buffer.length * numOfChannels * 2, true);
+
+        let offset = 44;
+        for (let i = 0; i < buffer.length; i++) {
+            for (let channel = 0; channel < numOfChannels; channel++) {
+                const sample = Math.max(-1, Math.min(1, channels[channel][i]));
+                view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+                offset += 2;
+            }
+        }
+
+        return new Blob([view], { type: 'audio/wav' });
+    }
+
+    function writeString(view, offset, string) {
+        for (let i = 0; i < string.length; i++) {
+            view.setUint8(offset + i, string.charCodeAt(i));
+        }
+    }
+        });
+    </script>
+</body>
+</html>
